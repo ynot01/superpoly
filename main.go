@@ -122,7 +122,7 @@ func main() {
 		}
 
 		// this code is supremely ugly
-		_, discordErr := client.Rest.CreateMessage(snowflake.MustParse("1467124145547509821"), discord.NewMessageCreate().WithContent(
+		_, discordErr := client.Rest.CreateMessage(snowflake.MustParse("134720091576205312"), discord.NewMessageCreate().WithContent(
 			// text
 			fmt.Sprintf("-# Round %v\n%v", msg.Round, discordText.Replace(fmt.Sprintf("%v%v%v says, \"%v\"\n", textRadio, textCKey, msg.Name, msg.Text)))).AddFile(
 
