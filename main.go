@@ -18,6 +18,17 @@ type manifest struct {
 	Total     int `json:"total"`
 }
 
+type message struct {
+	Id      int
+	Type    byte // 0:ic 1:radio 2:dchat
+	Round   int
+	Name    string
+	CKey    string
+	RadioCh string
+	Text    string
+	Image   []byte
+}
+
 func main() {
 	log.Println("Hello world")
 
@@ -38,35 +49,37 @@ func main() {
 		msgChunk = msgId / data.ChunkSize
 	}
 
-	msgErr := getMsg(msgId, msgChunk)
+	msgErr, msg := getMsg(msgId, msgChunk)
 	if msgErr != nil {
 		log.Printf("Error: %v", msgErr)
 	}
+	log.Println(msg)
+	// time.Sleep(24 * time.Hour)
 }
 
-func getMsg(msgId int, msgChunk int) error {
+func getMsg(msgId int, msgChunk int) (error, *message) {
 	indexFile, indexErr := os.Open("/2tb/yogout-backup/index.bin")
 	if indexErr != nil {
-		return indexErr
+		return indexErr, nil
 	}
 	defer indexFile.Close()
 
 	_, seekErr := indexFile.Seek(int64(msgId*20), 0)
 	if seekErr != nil {
-		return seekErr
+		return seekErr, nil
 	}
 
 	imgOffsetByte := make([]byte, 8)
 	_, imgOffsetReadErr := indexFile.Read(imgOffsetByte)
 	if imgOffsetReadErr != nil && !errors.Is(imgOffsetReadErr, io.EOF) {
-		return imgOffsetReadErr
+		return imgOffsetReadErr, nil
 	}
 	imgOffset := binary.LittleEndian.Uint64(imgOffsetByte)
 
 	imgLenOffsetByte := make([]byte, 4)
 	_, imgLenOffsetReadErr := indexFile.Read(imgLenOffsetByte)
 	if imgLenOffsetReadErr != nil && !errors.Is(imgLenOffsetReadErr, io.EOF) {
-		return imgLenOffsetReadErr
+		return imgLenOffsetReadErr, nil
 	}
 	imgLen := binary.LittleEndian.Uint32(imgLenOffsetByte)
 
@@ -75,62 +88,62 @@ func getMsg(msgId int, msgChunk int) error {
 		imgData = make([]byte, imgLen)
 		imgFile, imgErr := os.Open("/2tb/yogout-backup/img.bin")
 		if imgErr != nil {
-			return imgErr
+			return imgErr, nil
 		}
 		defer imgFile.Close()
 
 		_, imgSeekErr := imgFile.Seek(int64(imgOffset), 0)
 		if imgSeekErr != nil {
-			return imgSeekErr
+			return imgSeekErr, nil
 		}
 		_, imgReadErr := imgFile.Read(imgData)
 		if imgReadErr != nil && !errors.Is(imgReadErr, io.EOF) {
-			return imgReadErr
+			return imgReadErr, nil
 		}
 	}
 
 	msgOffsetByte := make([]byte, 4)
 	_, msgOffsetReadErr := indexFile.Read(msgOffsetByte)
 	if msgOffsetReadErr != nil && !errors.Is(msgOffsetReadErr, io.EOF) {
-		return msgOffsetReadErr
+		return msgOffsetReadErr, nil
 	}
 	msgOffset := binary.LittleEndian.Uint32(msgOffsetByte)
 
 	msgLenOffsetByte := make([]byte, 4)
 	_, msgLenOffsetReadErr := indexFile.Read(msgLenOffsetByte)
 	if msgLenOffsetReadErr != nil && !errors.Is(msgLenOffsetReadErr, io.EOF) {
-		return msgLenOffsetReadErr
+		return msgLenOffsetReadErr, nil
 	}
 	msgLen := binary.LittleEndian.Uint32(msgLenOffsetByte)
 
 	chunkFile, chunkErr := os.Open(fmt.Sprintf("/2tb/yogout-backup/meta/%05d.zst", msgChunk))
 	if chunkErr != nil {
-		return chunkErr
+		return chunkErr, nil
 	}
 
 	chunkDecompressedLenByte := make([]byte, 4)
 	_, chunkDecompressedLenReadErr := chunkFile.Read(chunkDecompressedLenByte)
 	if chunkDecompressedLenReadErr != nil && !errors.Is(chunkDecompressedLenReadErr, io.EOF) {
-		return chunkDecompressedLenReadErr
+		return chunkDecompressedLenReadErr, nil
 	}
 	chunkDecompressedLen := binary.LittleEndian.Uint32(chunkDecompressedLenByte)
 
 	chunkStat, chunkStatErr := chunkFile.Stat()
 	if chunkStatErr != nil {
-		return chunkStatErr
+		return chunkStatErr, nil
 	}
 
 	chunkCompressedByte := make([]byte, chunkStat.Size()-4)
 	_, chunkCompressedReadErr := chunkFile.Read(chunkCompressedByte)
 	if chunkCompressedReadErr != nil && !errors.Is(chunkCompressedReadErr, io.EOF) {
-		return chunkCompressedReadErr
+		return chunkCompressedReadErr, nil
 	}
 
 	chunkData := make([]byte, 0, chunkDecompressedLen)
 	decoder, _ := zstd.NewReader(nil, zstd.WithDecodeAllCapLimit(true))
 	chunkData, chunkDataErr := decoder.DecodeAll(chunkCompressedByte, chunkData)
 	if chunkDataErr != nil {
-		return chunkDataErr
+		return chunkDataErr, nil
 	}
 	defer decoder.Close()
 
@@ -153,14 +166,16 @@ func getMsg(msgId int, msgChunk int) error {
 	}
 	msgText, _ := varString(msgRecord, msgRecordOffset)
 
-	log.Println(msgId)
-	log.Println(msgType)
-	log.Println(msgRound)
-	log.Println(msgName)
-	log.Println(msgCKey)
-	log.Println(msgRadioCh)
-	log.Println(msgText)
-	return nil
+	outMsg := new(message)
+	outMsg.Id = msgId
+	outMsg.Type = msgType
+	outMsg.Round = msgRound
+	outMsg.Name = msgName
+	outMsg.CKey = msgCKey
+	outMsg.RadioCh = msgRadioCh
+	outMsg.Text = msgText
+	outMsg.Image = imgData
+	return nil, outMsg
 }
 
 func varInt(msgRecord []byte, msgRecordOffset int) (int, int) {
