@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -10,6 +12,13 @@ import (
 	"math/rand"
 	"os"
 
+	"github.com/disgoorg/disgo"
+	"github.com/disgoorg/disgo/bot"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
+	"github.com/disgoorg/disgo/gateway"
+	"github.com/disgoorg/snowflake/v2"
+	"github.com/joho/godotenv"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -30,7 +39,8 @@ type message struct {
 }
 
 func main() {
-	log.Println("Hello world")
+	log.Println("Starting superpoly...")
+	log.Printf("disgo version %v\n", disgo.Version)
 
 	var msgId int
 	var msgChunk int
@@ -49,11 +59,41 @@ func main() {
 		msgChunk = msgId / data.ChunkSize
 	}
 
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatalf("Error loading .env file")
+	}
+
+	client, clientErr := disgo.New(os.Getenv("disgo_token"),
+		// set gateway options
+		bot.WithGatewayConfigOpts(
+			// set enabled intents
+			// --needs no intents, only posts a message once a day to a channel
+			gateway.WithIntents(),
+		),
+		// add event listeners
+		bot.WithEventListenerFunc(func(e *events.MessageCreate) {
+			// event code here
+		}),
+	)
+	if clientErr != nil {
+		log.Fatalf("clientErr: %v", clientErr)
+	}
+	defer client.Close(context.TODO())
+
+	if gatewayErr := client.OpenGateway(context.TODO()); gatewayErr != nil {
+		log.Fatalf("gatewayErr: %v", gatewayErr)
+	}
+
 	msgErr, msg := getMsg(msgId, msgChunk)
 	if msgErr != nil {
-		log.Printf("Error: %v", msgErr)
+		log.Fatalf("msgErr: %v", msgErr)
 	}
-	log.Println(msg)
+
+	_, discordErr := client.Rest.CreateMessage(snowflake.MustParse("1467124145547509821"), discord.NewMessageCreate().WithContent("").AddFile(fmt.Sprintf("%v.webp", msg.Id), "9x9 capture of the speaker", bytes.NewReader(msg.Image)))
+	if discordErr != nil {
+		log.Printf("discordErr: %v", discordErr) // dont panick just try again in 24h
+	}
 	// time.Sleep(24 * time.Hour)
 }
 
