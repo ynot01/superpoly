@@ -130,7 +130,7 @@ func main() {
 			fmt.Sprintf("%v.webp", msg.Id), "", bytes.NewReader(msg.Image)))
 
 		if discordErr != nil {
-			log.Printf("discordErr: %v", discordErr) // dont panick just try again in 24h
+			log.Fatalf("discordErr: %v", discordErr)
 		}
 	}
 }
