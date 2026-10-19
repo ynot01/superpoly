@@ -5,18 +5,19 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math/rand"
 	"os"
+	"strings"
 
 	"github.com/disgoorg/disgo"
 	"github.com/disgoorg/disgo/bot"
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
 	"github.com/disgoorg/disgo/gateway"
+	"github.com/disgoorg/disgo/rest"
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/joho/godotenv"
 	"github.com/klauspost/compress/zstd"
@@ -38,10 +39,25 @@ type message struct {
 	Image   []byte
 }
 
+var discordText = strings.NewReplacer(
+	`*`, `\*`, // italic bold
+	`_`, `\_`, // italic underline
+	`~`, `\~`, // strikeout
+	`|`, `\|`, // spoiler
+	"`", "\\`", // code blocks
+	`@`, `\@`, // ping
+	`#`, `\#`, // channels
+	`<`, `\<`, // hide links
+	`>`, `\>`, // hide links
+	`\`, `\\`, // escape escape
+)
+
 func main() {
 	log.Println("Starting superpoly...")
 	log.Printf("disgo version %v\n", disgo.Version)
 
+	var total int
+	var chunks int
 	var msgId int
 	var msgChunk int
 	{
@@ -55,8 +71,8 @@ func main() {
 			panic(jsonErr)
 		}
 
-		msgId = rand.Intn(data.Total)
-		msgChunk = msgId / data.ChunkSize
+		total = data.Total
+		chunks = data.ChunkSize
 	}
 
 	err := godotenv.Load()
@@ -64,37 +80,59 @@ func main() {
 		log.Fatalf("Error loading .env file")
 	}
 
-	client, clientErr := disgo.New(os.Getenv("disgo_token"),
-		// set gateway options
-		bot.WithGatewayConfigOpts(
-			// set enabled intents
-			// --needs no intents, only posts a message once a day to a channel
-			gateway.WithIntents(),
-		),
-		// add event listeners
-		bot.WithEventListenerFunc(func(e *events.MessageCreate) {
-			// event code here
-		}),
-	)
-	if clientErr != nil {
-		log.Fatalf("clientErr: %v", clientErr)
-	}
-	defer client.Close(context.TODO())
+	{
+		msgId = rand.Intn(total)
+		msgChunk = msgId / chunks
 
-	if gatewayErr := client.OpenGateway(context.TODO()); gatewayErr != nil {
-		log.Fatalf("gatewayErr: %v", gatewayErr)
-	}
+		client, clientErr := disgo.New(os.Getenv("disgo_token"),
+			// set gateway options
+			bot.WithGatewayConfigOpts(
+				// set enabled intents
+				// --needs no intents, only posts a message once a day to a channel
+				gateway.WithIntents(),
+			),
+			// add event listeners
+			bot.WithEventListenerFunc(func(e *events.MessageCreate) {
+				// event code here
+			}),
+			bot.WithRestConfigOpts(
+				rest.WithDefaultAllowedMentions(discord.AllowedMentions{
+					Parse: []discord.AllowedMentionType{},
+				}),
+			),
+		)
+		if clientErr != nil {
+			log.Fatalf("clientErr: %v", clientErr)
+		}
+		defer client.Close(context.TODO())
 
-	msgErr, msg := getMsg(msgId, msgChunk)
-	if msgErr != nil {
-		log.Fatalf("msgErr: %v", msgErr)
-	}
+		msgErr, msg := getMsg(msgId, msgChunk)
+		if msgErr != nil {
+			log.Fatalf("msgErr: %v", msgErr)
+		}
 
-	_, discordErr := client.Rest.CreateMessage(snowflake.MustParse("1467124145547509821"), discord.NewMessageCreate().WithContent("").AddFile(fmt.Sprintf("%v.webp", msg.Id), "9x9 capture of the speaker", bytes.NewReader(msg.Image)))
-	if discordErr != nil {
-		log.Printf("discordErr: %v", discordErr) // dont panick just try again in 24h
+		textRadio := ""
+		if msg.Type == 1 {
+			textRadio = fmt.Sprintf("[%v] ", msg.RadioCh)
+		}
+
+		textCKey := ""
+		if msg.Type != 2 {
+			textCKey = fmt.Sprintf("(%v) ", msg.CKey)
+		}
+
+		// this code is supremely ugly
+		_, discordErr := client.Rest.CreateMessage(snowflake.MustParse("1467124145547509821"), discord.NewMessageCreate().WithContent(
+			// text
+			fmt.Sprintf("-# Round %v\n%v", msg.Round, discordText.Replace(fmt.Sprintf("%v%v%v says, \"%v\"\n", textRadio, textCKey, msg.Name, msg.Text)))).AddFile(
+
+			// image
+			fmt.Sprintf("%v.webp", msg.Id), "", bytes.NewReader(msg.Image)))
+
+		if discordErr != nil {
+			log.Printf("discordErr: %v", discordErr) // dont panick just try again in 24h
+		}
 	}
-	// time.Sleep(24 * time.Hour)
 }
 
 func getMsg(msgId int, msgChunk int) (error, *message) {
@@ -110,21 +148,21 @@ func getMsg(msgId int, msgChunk int) (error, *message) {
 	}
 
 	imgOffsetByte := make([]byte, 8)
-	_, imgOffsetReadErr := indexFile.Read(imgOffsetByte)
-	if imgOffsetReadErr != nil && !errors.Is(imgOffsetReadErr, io.EOF) {
+	_, imgOffsetReadErr := io.ReadFull(indexFile, imgOffsetByte)
+	if imgOffsetReadErr != nil {
 		return imgOffsetReadErr, nil
 	}
 	imgOffset := binary.LittleEndian.Uint64(imgOffsetByte)
 
 	imgLenOffsetByte := make([]byte, 4)
-	_, imgLenOffsetReadErr := indexFile.Read(imgLenOffsetByte)
-	if imgLenOffsetReadErr != nil && !errors.Is(imgLenOffsetReadErr, io.EOF) {
+	_, imgLenOffsetReadErr := io.ReadFull(indexFile, imgLenOffsetByte)
+	if imgLenOffsetReadErr != nil {
 		return imgLenOffsetReadErr, nil
 	}
 	imgLen := binary.LittleEndian.Uint32(imgLenOffsetByte)
 
 	var imgData []byte
-	if imgLen > 0 {
+	if imgLen > 0 && imgLen < 100000 { // images are ~13kB
 		imgData = make([]byte, imgLen)
 		imgFile, imgErr := os.Open("/2tb/yogout-backup/img.bin")
 		if imgErr != nil {
@@ -136,22 +174,22 @@ func getMsg(msgId int, msgChunk int) (error, *message) {
 		if imgSeekErr != nil {
 			return imgSeekErr, nil
 		}
-		_, imgReadErr := imgFile.Read(imgData)
-		if imgReadErr != nil && !errors.Is(imgReadErr, io.EOF) {
+		_, imgReadErr := io.ReadFull(imgFile, imgData)
+		if imgReadErr != nil {
 			return imgReadErr, nil
 		}
 	}
 
 	msgOffsetByte := make([]byte, 4)
-	_, msgOffsetReadErr := indexFile.Read(msgOffsetByte)
-	if msgOffsetReadErr != nil && !errors.Is(msgOffsetReadErr, io.EOF) {
+	_, msgOffsetReadErr := io.ReadFull(indexFile, msgOffsetByte)
+	if msgOffsetReadErr != nil {
 		return msgOffsetReadErr, nil
 	}
 	msgOffset := binary.LittleEndian.Uint32(msgOffsetByte)
 
 	msgLenOffsetByte := make([]byte, 4)
-	_, msgLenOffsetReadErr := indexFile.Read(msgLenOffsetByte)
-	if msgLenOffsetReadErr != nil && !errors.Is(msgLenOffsetReadErr, io.EOF) {
+	_, msgLenOffsetReadErr := io.ReadFull(indexFile, msgLenOffsetByte)
+	if msgLenOffsetReadErr != nil {
 		return msgLenOffsetReadErr, nil
 	}
 	msgLen := binary.LittleEndian.Uint32(msgLenOffsetByte)
@@ -160,10 +198,11 @@ func getMsg(msgId int, msgChunk int) (error, *message) {
 	if chunkErr != nil {
 		return chunkErr, nil
 	}
+	defer chunkFile.Close()
 
 	chunkDecompressedLenByte := make([]byte, 4)
-	_, chunkDecompressedLenReadErr := chunkFile.Read(chunkDecompressedLenByte)
-	if chunkDecompressedLenReadErr != nil && !errors.Is(chunkDecompressedLenReadErr, io.EOF) {
+	_, chunkDecompressedLenReadErr := io.ReadFull(chunkFile, chunkDecompressedLenByte)
+	if chunkDecompressedLenReadErr != nil {
 		return chunkDecompressedLenReadErr, nil
 	}
 	chunkDecompressedLen := binary.LittleEndian.Uint32(chunkDecompressedLenByte)
@@ -174,13 +213,16 @@ func getMsg(msgId int, msgChunk int) (error, *message) {
 	}
 
 	chunkCompressedByte := make([]byte, chunkStat.Size()-4)
-	_, chunkCompressedReadErr := chunkFile.Read(chunkCompressedByte)
-	if chunkCompressedReadErr != nil && !errors.Is(chunkCompressedReadErr, io.EOF) {
+	_, chunkCompressedReadErr := io.ReadFull(chunkFile, chunkCompressedByte)
+	if chunkCompressedReadErr != nil {
 		return chunkCompressedReadErr, nil
 	}
 
 	chunkData := make([]byte, 0, chunkDecompressedLen)
-	decoder, _ := zstd.NewReader(nil, zstd.WithDecodeAllCapLimit(true))
+	decoder, zstdErr := zstd.NewReader(nil, zstd.WithDecodeAllCapLimit(true))
+	if zstdErr != nil {
+		return zstdErr, nil
+	}
 	chunkData, chunkDataErr := decoder.DecodeAll(chunkCompressedByte, chunkData)
 	if chunkDataErr != nil {
 		return chunkDataErr, nil
